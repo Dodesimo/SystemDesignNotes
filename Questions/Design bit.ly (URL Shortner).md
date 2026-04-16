@@ -1,0 +1,70 @@
+
+- Functional features:
+  - Core features that define what tasks system performs:
+	- Submit a long URL, get a shortened version (can accept a custom alias and an expiration date)
+	- Access the original URL by using the shortened URL.
+- Non-functional features:
+  - Specifications about how a system operates.
+  - Shortcodes must be unique.
+  - Redirection: low latency
+  - Focus on availability, scale to support lots of shortened URLs.
+- Define entities:
+  - Original URL, shortened URL, and the user.
+- Endpoints:
+  - POST /urls (takes in original URL, optional alias, optional expiration date), return a 200 if success (also can just return the short url)
+  - GET /urls (takes in the shorter URL), redirects to the original URL.
+- High Level Design:
+  - Get a long URL, validate, and return existing short code if there.
+  - If URL valid, generate a short code:
+	- Function that takes in long URI and shorten
+	- If there’s a custom alias, use that if we know it doesn’t exist, to prevent collisions, prefix with unique character or store in separate namespace.
+  - Insert in DB: long url, short code, expiration date, createdBy, return the short URL.
+- When looking up URL:
+  - We send a GET request, look it up in the DB, if its expired, return a 410 Gone, else send a redirect to the user browser.
+- Invalid URLs: run a background job to delete rows and/or have cache TTL match URL expiration times.
+- Types of redirects:
+  - 301: permanent redirect, cached by browser, resource has been permanently moved.
+  - 302: found, indicates resource has been temporarily located at different URL, browser doesn’t cache, we go through our server first.
+- We prefer a 302:
+  - More control about redirection, prevents caching and issues if we need to update the URL, allow us to track click statistics.
+- How do we shorten?
+  - Take the first N characters: stupid, since any two URLs that have the first N characters have the same short URL.
+  - Random number generator: not enough entropy, so we use a hash code for the URL (deterministic, fixed-size string of characters), then encode it in base 62, then take N characters (since slash and plus aren’t allowed).
+	- How do we handle collisions (still possible)?
+	  - UNIQUE constraint on short code column, retry with bounded attempts.
+	  - When saving to the database, retry process with a random salt.
+  - OR we can have a counter, and encode it in base 62.
+	- Redis is good: single-threaded, atomic operations.
+	- Two simultaneous calls always get different values.
+	- Not good because maintaining a single global counter is hard, sequential counters also have predictable short codes.
+	  - Allows for URI enumeration.
+- How do we find redirects fast?
+  - Avoid a full table scan:
+	- Add an index: sorted list of URLs. Add index on short code column (B-tree index). Designate the short code as the primary key (enforce both indexing/data integrity), since primary key automatically creates an index and ensure uniqueness.
+	- Issue: even with optimized queries and indexing, single database struggles to keep up this volume.
+  - Use a in-memory cache (Redis, memcached): stays between server and database.
+	- Cache stores short to long mappings
+  - If not found fetch.
+  - Memory is faster than SSD/HDD significantly.
+  - Issues with invalidation, but not that deep since URLs barely change.
+  - Cache needs time to warm up (initial requests are misses)
+- Can also use CDNs and have URLs stored at edge computers around world.
+  - CDN nodes: cache mappings of codes to long URLs, handle close to user location.
+  - Redirection can happen at CDN level without ever concerning the origin server.
+  - Issues with cache invalidation and consistency, setting up edge computing (costs with CDN as well)
+  - Complexity in debugging a distributed edge environment as well.
+- What if database goes down?
+  - Use database replication: create identical copies of database on different servers, redirect to another,
+  - Backup: have a system that takes a snapshot and stores it in a separate location.
+- Separate the read and write operations where reads are a separate microservice, writes as a separate microservice (horizontally scale to handle increase load)
+  - If we have a counter, we need a single source of truth for the counter.
+  - Global counter: use a centralized Redis instance (store counter and other metadata)
+	- Works because redis is single threaded and has atomic operations, so every user request generates the next possible counter value and no two will have the same.
+  - Can batch the counter: Write Service requests a batch of counter values, Redis atomically increments counter by 1000 and returns the start. Write service can use 1000 locally.
+  - Use Redis Cluster with automatic failover to ensure high availability if something fails.
+  - Have a redis instance for each region that has disjoint counter ranges.
+  - If redis fails before replicating latest counter, we may lose values but doesn’t matter since we have uniqueness constraint (database’s unique constraint)
+- If there is an asymmetric workload, separate the read and write services.
+- Why B trees over hash indices even though hash indices have O(1) look up but B trees have O(log n)?
+  - B trees support range queries and ordered traversal.
+- Base X has more compact representations than Base Y if X > Y.

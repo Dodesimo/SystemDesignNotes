@@ -1,0 +1,105 @@
+- FB News Feed:
+  - Show recent stories from users in social graph.
+  - Focused on follow relationships (unidirectional)
+  - Core requirements:
+    - Make posts
+    - Friend follow people
+    - View posts in reverse chrono order
+    - Feed needs to be paged.
+  - Nonfunctional requirements:
+    - Tolerate a minute of post staleness (so we are eventually consistent)
+    - Posting and viewing needs to be fast (< 500 ms)
+    - Large # of users, follow unlimited people, be able to be followed by unlimited # of people.
+  - Core entities:
+    - Users: people in system
+    - Posts: made by any user, shown in feed of users.
+    - Follow: uni-directional link between users in system.
+  - APIs:
+    - POST /post {content: {}} -> return a 200 w/ a post ID
+      - Auth is done with headers/ JWTs
+    - PUT /users/[id]/follow (user put b/c its idempotent so we don’t have situations of failure when the user clicks follow twice)
+    - GET /feed?pageSize={size}&cursor={timestamp}?
+      - Paginated get for a feed, returns a list of posts., as well as next cursor.
+      - The cursor is the timestamp so we see N posts order than that particular timestamp.
+  - High Level Design:
+    - Users create post:
+      - Horizontally scaled service behind API gateway + LB
+      - Easy to scale stateless hosts
+      - Literally hit POST request, send to DB with an insert.
+        - DB:
+          - Posts table with id, content, creatorId, created AT
+          - Document DB since content has unstructured data and this is a write heavy workload (high throughput if load spread evenly)
+    - Users should friend/follow people:
+      - Follow service, new table where key is person, value is a list of their followers.
+      - userFollowing is the partition key, userFollowed is the sort key.
+      - Create global secondary index with reverse relationship (partition key of user followed and sort key of user following)
+      - This allows for quick queries:
+        - Check if user is following another user: query with partition and sort key (user following : userFollowed) (look up both keys)
+        - Get all users user is following: use partition key userFollowing (range)
+        - Get all users who are following a given user: use partition key or user Followed in the GSI.
+      - So table has userFollowing, userFollowed relationship of partition key, sorted key, GSI has the inverse.
+    - Users should be able to view a feed of posts from people they follow?
+      - We can query for all userFollowing for a person.
+      - Query all posts for this list and concatenate and return in latest first.
+      - Have a separate feed service: read heavy w/ different query patterns so separate it.
+      - Add a GSI on the posts table on userID as a partition key and post’s creation timestamp as a sort key.
+        - Allows us to get posts then sort them.
+        - GSI: secondary index on the table that allows for a new view/efficient query.
+      - This isn’t the best solution since a user can have a lot of followers, each of those users can have a lot of posts.
+      - Total set of posts can be very large.
+      - Not gonna scale.
+    - Page through their feed:
+      - What they’ve seen so far: timestamp of oldest post, users are viewing posts from youngest to oldest, one that they’ve stopped is a cursor.
+      - Use GSI that sorts posts by creation timestamp: return only posts older than the cursor.
+        - Get all users a given user is following.
+        - Get all posts from users > timestamp.
+        - Return
+- Deep Dives:
+  - Handle users with large numbers of users.
+  - Queries in follow table will take a while to return.
+    - Get people we follow.
+    - Then make a large number of queries to Post to build feed.
+    - Fan-out on read: single read request fans out to make many more requests.
+  - Single request creates many more requests (especially when latency is concern).
+- Solution:
+  - Fan out on write: instead of assembling feed when user asks, precompute feeds when posts are made.
+  - Can set a max number of friends in instances where there’s a large # of follows.
+  - Create a PrecomputedFeed table: pull from there.
+    - Key of userId, value is a list of postIds in reverse chronological order.
+    - Don’t need secondary indices since we access table by userId.
+- Handle users with large # of followers?
+  - Write to millions of Feed records. How to do efficiently?
+  - Solutions:
+    - Blast requests.
+      - This doesn't work because a single post service host can’t handle so many connections.
+    - Good: async workers: queue up write requests on a queue and then workers can update feeds based on them.
+      - This works because we are eventually consistent.
+      - New post created: add entry in the queue w/ postId and creator userId.
+      - Worker: looks up the post on posts, then looks up list of followers for follow, then for precomputed feed, for each follower, inserts the post into the postId.
+      - Issue: throughput of feed workers need to be huge; w/ millions of followers, feed worker has a lot to do.
+      - Uneven distribution of work each worker does.
+    - Better: choose what accounts we want to precalculate for and not.
+      - Add a flag to follow table indicates that this follow isn’t precomputed.
+      - Ignore requests for these users in the async worker queue.
+      - When users request feed, grab partial precomputed feed and merge it with recent posts not precomputed.
+        - Allows us to choose on a fan out on read or fan out on write per account basis.
+        - Do a mix of both.
+  - Doing feed merging at read vs write: more computation needs to be done.
+- How to handle uneven reads of posts:
+  - Most posts; read only for a few days, never again.
+  - For many posts: number of reads during first few hours is huge.
+  - DynamoDB scales only when there’s even load across keyspace.
+  - How to fix?
+    - Large distributed cache in front of the post table and the table.
+      - Since posts are rarely edited, long TTL on the posts, evict posts recently used.
+      - As long as cache large, vast majority of requests hit cache.
+      - When posts are edited, invalidate the cache for that ID.
+      - Issue:
+        - Post cache has the same hot key problem: some cache shards are going to have an unequal distribution of load.
+    - Better: don’t use shards but instead replicate cache instances where a instance can serve any post.
+      - This prevents a hot shard.
+      - Load balancer distributes requests across instances, so each one independently handles a fraction of total traffic.
+      - Means more cache misses initially (N if there’s N shards versus 1 if there’s 1 shard).
+      - N requests is much much smaller than millions of requests needed to handle if no cache in the first place.
+      - Challenges: smaller # of posts across cache if we choose to distribute posts since things need to exist in all.
+        - Additionally, invalidation is harder since every a post edit could reside on every single cache.

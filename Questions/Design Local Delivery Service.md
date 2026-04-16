@@ -1,0 +1,56 @@
+  - Functional:
+    - Query availability of items deliverable in an hour by the location.
+    - Order multiple items at a same time.
+  - Non Functional:
+    - Fast availability requests.
+    - Ordering needs to be strongly consistent (don’t want two people ordering the same thing)
+  - Core Entities:
+    - Item: abstraction of an object
+    - Inventory: an actual instant of an object, physical item
+    - Distribution Center: physical location where items are found
+    - Order: collection of inventory thats been ordered
+  - Use pagination to avoid overwhelming client with more data than necessary.
+  - Availability:
+    - GET /v1/availability (pass in lat long keywords and page size and page number with query params),
+      - Returns a list of items back with name and quantity.
+    - POST /v1/order:
+      - lat: LAT, long: LONG, list of items
+      - Returns a failure | order
+  - High level design:
+    - Query availability of items:
+      - First: find closest distribution centers within an hour, then check inventory of item.
+      - Primitive: given a distribution center table, nearby service will query this and calculate euclidean distance and see whats within an hour.
+      - Get inventory: query the inventory table and item table (use Postgres since this is relational joining inventory with item gives us name)
+      - Item:
+        - Id, name, description
+      - Inventory:
+        - Itemid, dcid, quantity (join on itemid and dcid for specific inventory)
+      - Make a request to availability service, get nearest distribution centers (querying DC table)
+      - Use these distribution centers and query DB for inventories, sum up results and return.
+  - Customers need to order items:
+    - To maintain strong consistency, we need a locking mechanism (record order so that only one user locks it at a time)
+    - Need a lock:
+      - Good solution have two data stores with a distributed lock.
+        - Separate databases for orders and inventory (order placed, look at relevant inventory records, create order record, decrement the inventory and release the lock)
+          - Best data store for each use case: key-value for inventory, relational for orders.
+          - Nasty failures; services crash after we created order but before we decremented (need to reverse failures)
+          - Two orders have overlapping inventory requirements (deadlock both users)
+          - Handle failure modes with saga (break down complex transaction into sub transactions)
+      - Best: Singular postgres transaction:
+        - Have both orders and inventory in same DB
+        - Postgres database has ACID properties
+        - Can do a singular transaction with isolation level serializable (outcome is if they ran one at one time)
+          - If two people order at same time, one gets rejected.
+        - This prevents having separate data stores for each use case.
+      - So make a request to orders, create a singular transaction to postgres
+        - Check inventory for items (if any out of stock transaction fails, if in stock, record order update status for items to ordered, then create new row in orders table recording order (committing transactions))
+  - Deep Dives:
+    - How to make availability incorporate traffic and drive time?
+      - Use a time prediction service against nearby DCS (these are put into memory of our service since they rarely change)
+      - Two phase filtering: filter based on cheap check (simple distance), then check with expensive travel time API
+    - How do we make availability lookups fast?
+      - Use a cache for inventory (set of inputs like location and inventory), use a low TTL to ensure results are fresh.
+      - Use read replicas and partitioning: group DCs based on their zip code (partition inventory based on this so queries go to mostly 1 or 2 partitions)
+        - Remember: sharding is horizontal scaling, partitioning is splitting into tables within a db
+        - Pattern: if we have consistency in what we are accessing, group together.
+  - Use read replicas for availability queries but make orders strongly consistent and handled by main DB.

@@ -1,0 +1,160 @@
+
+  - Functional requirements:
+    - View events
+    - Search for events
+    - Book tickets
+  - Non-functional:
+    - Prioritize availability for searching and viewing events, but consistency for booking events.
+    - Handle high throughput of popular events
+    - Have low latency search
+    - Read heavy
+  - Core Entities:
+    - Event: info about date, description, time, performer/team
+    - Ticket: info about individual seats (when new event is created ticket is generated for each seat in the venue’s seat map), seat map data and ticket status used to generate the interactive UI.
+    - User: individual interacting with system
+    - Performer: individual or group performing (have info like description, xyz)
+    - Venue: location of event, address capacity, specific seat map
+    - Booking: details about a user’s ticket purchase (user id, ticket ids, booking statuses)
+  - API/System Interface:
+    - GET endpoint: takes an event id and returns details.
+      - Details: performer, venue, event, ticket array
+    - Search: get endpoint: set of searchable parameters (keywords, start dates)
+    - POST endpoint:
+      - Takes a series of tickets and returns a booking id
+  - User should be able to view events:
+    - Have an event service that connects to events DB and returns event, venue, and performer data
+      - Join the event’s venue id with the venue and the performer id for the performer to get information.
+  - Search of events:
+    - Basic: simple service that accepts search queries, connects to DB and queries it by filtering for fields in the API request.
+  - Reminder that API gateway handles authentication, rate limiting, SSL termination.
+    - Query events DB for events matching search parameters and return them to the client.
+  - Book tickets:
+    - Use a database that supports transactions (use an ACID database).
+    - Use row level locking or optimistic concurrent control.
+  - New table booking:
+    - Id, userId, tickets[]
+  - New table ticket:
+    - Id, eventId, seat price, status (available, booked), userId
+    - Has a bookingId column linking to bookings table.
+  - New service: bookings (interfaces with payment processor for transactions).
+    - Payment confirmed: booking service updates ticket status.
+    - Communicate with bookings and tickets to fetch, update, store relevant data.
+  - Booking server post request: checks ticket availability, updates status of selected tickets, create new booking record
+    - Successful: return success
+    - Else: return failure.
+  - Improve experience by reserving tickets?
+    - Ticket must be locked for user while they are checking out.
+    - When user abandons checkout process, ticket is released for others to purchase.
+    - If user completes checkout, ticket is sold and booking confirmed.
+  - Bad: long running database locks:
+    - Use a long-running database lock called an interactive transaction, exclusive access to the first user booking it.
+    - Done with “select for update” statement (locks selected row)
+    - Everything else is committed or rolled back (other transactions will be blocked until a lock is released)
+    - If user finalizes purchase, transaction committed, DB lock released, ticket status is “booked”
+    - If user takes too long or abandons purchase, system relies on subsequent actions or session timeouts (introduces the risk of tickets being locked indefinitely).
+    - Issues: locks are supposed to be short (if too long, strains DB resources and increases risk of lock contention/deadlock)
+    - Handling edge cases has risks b/c lock could be left in an uncertain state.
+  - Status and Expiration Time w/ Cron:
+    - Status field and expiration time for every ticket.
+    - Status changed from “available” to “reserve.”
+      - Current timestamp is recorded.
+    - How do we change status?
+      - User finalizes purchase: status changes to “booked,” lock is released.
+      - If the user takes too long or abandons, the status changes back to available based on TTL.
+      - Cron job releases lock (query rows “reserved” and set them back to available after elapsed time).
+      - Ideally: lock removed almost exactly after expiration.
+    - Issues:
+      - Cron jobs result in delay between ticket expiration and actual time.
+      - Takes a while for high-demand events.
+      - If a cron job has error, causes significant disruptions.
+  - Implicit status with expiration and time:
+    - Status of ticket is either available or reserved but reservation expired.
+    - Instead of using long-running interactive transactions, use short ones.
+    - Check to see if current ticket is reserved but expired (we can still book it) or available.
+    - Change “available” to reserved and setting expiration to +10 minutes.
+    - Commit transaction.
+    - Read operations can be slightly slowed as we need to filter on two values (quicker with a compound index).
+    - We can clean stuff up with cron/periodic sweep (important diff that system behavior isn’t impacted if sweep delayed).
+  - Better lock: distributed w/ TTL:
+    - We need a temporary reservation automatically expiring.
+    - When user selects a ticket: acquire Redis lock with unique ID w/ predefined TTL.
+    - User completes purchase: status in DB updates to booked, lock manually released.
+    - If TTL expires, redis automatically releases lock, ticket can be booked by others.
+    - Ticket table has two states: available and booked (ticket id: user id pair in redis).
+      - No race condition when acquiring lock, redis set w/ key, value and time out is atomic.
+      - Multiple ticket bookings: acquire locks sequentially per ticket.
+    - Issues:
+      - read-path complexity (how do we show reserved seats? Query redis for all locked ticket ids, adds a redis round-trip, can also write-through reserved status to DB when doing lock acquisition, treating redis as a source of truth)
+      - Failure: if lock goes down, period of degradation, no double booking (database uses OCC or row-level locking).
+      - User can still get an error if someone beats them to it.
+      - TTL expiration during payment: DB transaction fails for one (OCC ensures only one write succeeds), issue automatic refund through stripe for failed booking.
+  - What booking looks like?
+    - Select seat.
+    - Forward request to API gateway
+    - Lock the ticket, add to Redis distributed lock (TTL 10)
+    - Write booking entry in the DB with a status of inprogress.
+    - Route them to payment, if user stops, 10 mins later lock is auto released, ticket is available.
+    - Payment filled, client creates a resulting payment token and booking id to server.
+      - Stripe processes payment notifies system through a webhook (HTTP callback when something happens) when payment was successful.
+    - System webhook gets bookingId embedded in the metadata, initiates a transaction to concurrently update ticket and booking table.
+      - Ticket is sold, booking is done.
+  - Support 10s of millions of concurrent request during popular events?
+    - Sharding, horizontal scaling, caching.
+    - Cache high read rate but low update frequency data (event details, performer bios and static details).
+    - Cache w/ in-memory data stores like Redis and Memcached.
+    - Read-through cache strategy: if we have a miss, database read and cache updates.
+    - Cache invalidation:
+      - Setup DB triggers to notify caches of data changes, invalidating that way.
+      - TTL for cache entries to avoid stale data, periodic refreshes.
+        - Long for static data, short for frequently updated data.
+    - Load balance based on round robin, least connections.
+    - Horizontal scaling: since each of the event services is stateless, horizontally scale and meet demand.
+  - Ensure good user experience during high demand events?
+    - SSE for real-time seat updates:
+      - Update seat map as soon as seat is booked by another user without refreshing page.
+      - Server pushes data to the client.
+      - Issue:
+        - Irritating as seats immediately fill up.
+    - Better:
+      - Virtual waiting queue: admin enabled virtual waiting queue to manage user access.
+      - Queue controls flow of users accessing booking interface: prevents system overload.
+      - User requests to view booking page: put in a queue, add a SSE/websocket (websocket if bidirectional). Queue can be backed by redis (sorted set with timestamps for ordering).
+      - Periodically dequeue based on criteria from front of queue.
+        - Notify users via connection they can proceed.
+      - Same time: mark user as admitted in Redis (admitted: eventId w/ TTL).
+      - Check this set before allowing reservation requests rejecting users who haven’t admitted through queue.
+      - Challenges: users might be frustrated if not accurate, provide users with constant feedback on queue position and waittime.
+  - How to improve search?
+    - Querying to search for events based on keywords requires full table scan so its slow.
+    - Good soln: indexing and sql query optimization:
+      - Create indexes on event, performer, venue to improve query performance.
+      - Index frequently accessed search query columns.
+      - Optimize queries to improve performance: explain to analyze query plans, avoid select *, use limit to restrict # of rows, use UNION instead of OR for multiple queries.
+    - Issues:
+      - Standard indices are not effective for queries involving partial string matches (need full-text search capabilities or Like operators)
+      - Indices increase storage requirements and slow down write operations.
+  - Full text indices:
+    - Tsvector, GIN indices: allow for full text search
+    - Issues:
+      - Full text indices require additional storage space, slower to query than standard indices.
+      - Full text indices: more difficult to maintain, require special handling of queries and maintaining database.
+  - Great:
+    - Use full-text search engine like Elastic Search:
+      - Allows for full text search, complex queries, handling high volume.
+      - Works using inverted indices: efficient for search operations, allow for quick location/retrieval of data by mapping unique word to documents or records.
+      - Enable data in elastic search to be in sync with SQL db data through change data capture:
+        - Get changes in the SQL DB and replicate them in ES index.
+      - Enable fuzzy searches: allow error tolerance in search queries.
+    - Challenge: keeping elastic search index synced with postgres, maintaining elastic search cluster adds infra complexity.
+  - How to speed up frequently repeated search queries?
+    - Use Redis + Memcached: store results of frequently executed search queries, store keys based on query search query params, set TTLs based on data time to live.
+    - Issue: stale data can give wrong search results if u cache fuzzy search results (combination of TTLs and cache invalidation triggers)
+  - Use elastic search caching:
+    - Elastic search maintains query caches at shard level for filter results (filters used to find data)
+    - Separate shard-level request cache for full search responses.
+      - If the queries are expensive we can cache the filters and the data associated.
+    - Useful for adaptive caching (learn and cache results of most frequently executed queries)
+    - Use CDNs to cache search results closer to user (only if not personalized)
+    - Challenges:
+      - Invalidate cached data and real-time changes (hard since search queries and potential results aren’t connected)
+      - Need more infra.

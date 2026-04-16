@@ -1,0 +1,163 @@
+- Dropbox:
+  - Core functionalities:
+    - We upload file
+    - Download file
+    - Share file
+    - Sync file
+  - Non functional:
+    - High availability
+    - Large upload sizes
+    - Secure and reliable
+    - Make uploads, downloads, syncs fast
+  - Core entities:
+    - File (raw data thats getting uploaded and downloaded), FileMetadata (more data about the file like name/size), and user
+  - API Endpoints:
+    - Upload:
+      - POST /files request {File, Metadata}
+    - Download file:
+      - GET /files/fileid (use as a query parameter)
+        - File and FileMetadata
+      - Isn’t the best way to do this, but communicate with interviewer.
+    - Share File:
+      - POST /files/fileid/share metadata {User[]} (who to share with)
+    - Query changes for sync:
+      - GET /files/changes?since={timestamp} → ChangeEvent[] (each event has a file id, type of change, and updated metadata)
+    - User info gets passed into headers through JWT
+      - Good way to ensure security and authentication, avoid passing user info in the request body and can be manipulated by the client.
+  - High-Level Design:
+    - Metadata: use a no-SQL DB (TBH doesn’t matter, but there’s not a lot of relational data we are just needing to query files by the user)
+      - Id, name, size, mimetype, uploadedBy
+  - How do we store file raw bytes?
+    - One way: upload files directly to our backend and store them there.
+      - Store the file on the server’s local file system.
+      - Reasonable for a small application, but doesn’t scale and isn’t reliable.
+      - Issues: file number increases, need to add more storage or horizontally scale. Not reliable when server goes down, we lose access to all files.
+    - Store file in blob storage:
+      - User uploads file to backend, directly send to blob storage, store metadata in database. Store virtually unlimited # of files, more reliable (won’t lose access if server goes down)
+      - Challenge: how do we handle file upload but no metadata (make it transactional, only save metadata if file uploaded and vv)
+      - Redundancy: we upload file twice (once to backend and another to blob storage).
+    - Directly store in blob storage:
+      - Best approach: use presigned URLs to upload file to blob storage, once uploaded, send notif to backend to save the metadata.
+      - First: request pre-signed URL from backend, save metadata with status of uploading.
+      - Second: upload file to blob storage directly from client, PUT request, file is the body of request.
+      - Once uploaded: send notif to backend w/ S3 notifications, then change status to uploaded.
+  - How do we handle downloads:
+    - Downloading through file server to backend and then from backend to client is wasteful (two downloads)
+    - Download from blob storage: request a presigned download URI from backend, use that to download from blob storage directly to client.
+    - Slow because blob storage is located in a single region (large geographically distributed user base), users far away will have slower download times.
+      - Use a CDN to cache the file closer to the user.
+    - Use CDN: cache file closer to the user, CDN is server network distributed across globe that cache files, serving them closer to the user.
+      - Generate a presigned URL that allows file to be downloaded from the CDN.
+      - Challenges: CDN is expensive, be strategic about what files are cached and for how long, use a cache control header, use cache invalidation mechanism to remove files when updated/deleted.
+  - How do we share files:
+    - Bad idea: add a sharelist to the metadata, but when the user opens the site we expect to see a list of all their files and files shared with them.
+      - Getting own files is easy: index on uploadedBy
+      - But, harder to do a scan on shareList (more time consuming)
+    - Cache a list that maps the inverse of the file metadata share list:
+      - Cache entry is a key-value pair user1:[“f1”, “f2”]
+    - To keep this up to sync with the sharelist in the file metadata keep this mapping in the same DB and update sharelist and sharedFiles in a transaction
+    - Normalize data and create a new table mapping userId to fileId.
+      - Maps user id to fileId (when user opens site, get list of files shared with them with userId)
+      - userId partition key fileId sort key, each user id can appear numerous times and file id for each one is unique (since the same userId can have multiple files)
+        - userId and fileId together is a composite primary key.
+    - No need ot have a sharelist.
+    - Negative: less efficient than previous since we query using index instead of key lookup.
+  - Need to sync local to remote and remote to local
+    - Local to remote: file updates locally, sync changes with remote server.
+      - Remote server is ground truth, so get it consistent as soon as possible.
+      - Client side async sync agent: monitors local folder for changes using OS-specific file system events
+      - Change detected: queue modified file, uses upload API to send changes along with updated metadata (use presigned URL for a relevant block/chunk)
+      - Conflicts are last write wins (two users make changes, most recent edit wins).
+      - If we wanted to version, add a new file and update a version number, pointer on the metadata.
+    - Remote to local:
+      - Client needs to know changes on remote server so changes can be pulled down.
+      - Polling: ask server if anything has changed since last sync, query DB for > updatedAt, but can waste bandwidth and be slow to detect changes.
+      - Websocket: server maintains open connection with each client and pushes notifications when changes happen.
+        - Hybrid approach: each client has a WebSocket connection to the server per device/session
+        - Reliability: active notification, server pushes change events through the web socket connection in real as they happen.
+        - Periodic polling: web socket connections can drop and messages can be missed, so the client periodically polls server to catch missed changes (ensures eventual consistency).
+  - Total picture:
+    - Uploader: client that uploads file (web browser, mobile app desktop app)
+    - Identify local changes and push changes to remote.
+    - Downloader: client downloads file, can be same as uploader.
+      - Responsible for determining when file has locally changed on remote and downloading changes
+    - File service: read/write file metadata in the DB, as well as generating presigned URLs using S3 SDK
+      - Purely local operation, meaning service uses AWS creds to cryptographically sign w/o S3 call
+      - Doesn’t do file uploads and downloads directly (does through URLs)
+  - MIME: media type
+  - File Metadata DB:
+    - Has information about file name, size, MIME type, user who uploaded
+    - Also has a shared files table that maps users to fields they are permitted to use.
+  - CDN:
+    - Cache closer to user to reduce latency
+    - Instead of giving direct S3 presigned URL, file service generates CDN signed URL
+      - CDN fetches from S3 on first request and services it from edge on subsequent requests
+    - When we do an upload, we do presigned URLs only for S3 and upload there.
+  - How do we support large files?
+    - Progress indicator: need to keep track of upload
+    - Resumable upload: pause and resume uploads: lose connection, close browser, pick back up.
+    - POST requests have timeouts.
+    - Can’t upload very large files through single requests due to limitations in browser or server.
+      - They impose limits on size of request payloads.
+    - Network interruptions: larger files are most susceptible to network interruptions.
+    - User experience: users have no clue how long uploading takes.
+    - Use a technique called chunking: break file up into smaller pieces and upload them one at a time.
+      - Break it up on the client side.
+      - Don’t do it on the server side (because that defeats the point we had to upload whole file anyway).
+  - How to handle resumable uploads?
+    - Keep track of chunk level uploads (save what chunks have been uploaded so far in the DB).
+    - When user resumes upload, check chunks field to see which chunks have been uploaded, then start uploading chunks that haven’t been uploaded yet.
+    - Don’t need to start from scratch.
+  - How does this chunks field kept in sync with actual chunks?
+    - Good: use client to orchestrate chunk statuses.
+      - Client takes file: chunks it, uploads chunk directly to S3.
+      - S3 responds to each chunk upload with a success message.
+      - Upon success: client sends PATCH to update chunks field in file metadata.
+      - Issue: we are trusting the client to keep chunks field in sync with actual chunks, malicious user could send a patch request that marks all of the chunks uploaded without actually uploading (leads to inconsistent state)
+    - Better:
+      - S3 event notifications don’t trigger for individual multipart uploads
+      - Use ETags instead.
+        - Every chunk gets an ETag upon successful upload which is included in Client’s PATCH request
+        - Backend then verifies these tags by calling S3’s ListParts API, allowing an efficient way to validate multiple chunks.
+        - We verify.
+  - How do we know if file has been uploaded before and what chunks have already been uploaded?
+    - Can’t rely on file name since diff users could have same name.
+    - Create a fingerprint hash of the content of the file
+    - Since two users may upload the exact same file, this hash fingerprint is a field for a particular fileId.
+    - For resumable uploads, individual chunks need to be fingerprinted as well.
+      - This allows for us to know exactly what chunks have been transmitted so far.
+    - First:
+      - Chunk file into pieces and calculate fingerprint for each chunk and file.
+      - Send a request to check if file with the same fingerprint already exists for the userId, resume upload by fetching existing chunk statuses.
+      - File doesn’t exist: POST to start a multipart upload, backend calls CreateMultipartUpload API to get uploadId
+        - Generate presigned URLs fro each part, same metadata w/ uploading status, and return uploadId.
+    - Client uploads each chunk to S3 using corresponding presigned URLs, sends PATCH request with new chunk status and ETag, backend validates chunk uploads with S3’s ListParts API.
+    - After all chunks have been marked as uploaded, backend calls CompleteMultipartUpload with list of part numbers and ETags.
+      - Assembles object, and then when this is done from S3, mark the file as uploaded.
+  - Downloads:
+    - aren’t chunked, we download the complete file, for extremely large files, can do range requests of downloads.
+  - How to make uploads, downloads, syncing as fast as possible:
+    - Download: use CDN to cache file closer to user.
+    - Uploads: can upload chunks in parallel
+    - File changes: only sync chunks that actually changed.
+      - Syncing is faster.
+    - Delta sync is useless (change at the beginning shifts all chunks).
+    - Determine chunk boundaries through rolling hash (content defined chunking).
+    - Can also use compression to speed up uploads and downloads.
+      - Compression reduces file size so we transfer fewer bytes.
+      - Uploading directly to S3: compression happens clientside, client compresses file before uploading, compressed data is in S3.
+        - Only compress if speed from transferring less bytes outweighs time needed to compress and decompress a file.
+        - Not worth for png or images, but great for text files.
+        - Compression algorithms: GZip Brotli, Zstandard
+        - Always compress before encryption (this maximizes compression ratio) because compressing randomness is harder.
+  - How to ensure file security?
+    - Use HTTPS to encrypt data in transit.
+    - Also encrypt files in S3
+    - Have an access list (share table/cache) tells us we can only share download links with authorized users.
+    - Download link: generate signed URI only valid for a short period of time.
+      - Can add additional restrictions like IP binding or also use auth cookies.
+    - This also works w/ modern CDNs:
+      - Generation: signed URL generated on server, created using a private key from the CDN
+      - Distribution: signed URL given to authorized user who can download from CDN
+      - Validation: when CDN gets a request with a signed URI, verifies signature and other expiration timestamp, and if good, serves content.
+  - Downloading is just a get request to the URL.
