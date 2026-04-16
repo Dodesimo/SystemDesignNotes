@@ -1,0 +1,43 @@
+
+  - Push real time updates:
+    - Can do through HTTP polling, but not efficient.
+    - Use Server-sent Events and/or websockets.
+    - Server side: Pub/Sub services or stateful servers in a consistent hash ring (where certain users always map to particular servers)
+  - Managing Long Running Tasks:
+    - Decouple through a queue architecture.
+    - Submit heavy stats, validate the request, push job to a queue, return job ID within milliseconds.
+    - Workers pull jobs from queue, execute the actual work.
+    - Client sends a request to server, the job is then put on a queue and then added to a DB.
+      - Work is done asynchronously, and job updates in database.
+    - Think about job status tracking, retries, and failure scenarios.
+  - Dealing with contention:
+    - When users try to access same resource simultaneously (like booking the last concert ticket or bidding on an auction item), need a mechanism to prevent race condition and ensure data consistency.
+    - Use locks and other techniques.
+    - Or use two phase commit protocols or queue-based serialization (force requests into a FIFO queue).
+  - Scaling reads:
+    - Read traffic grows much faster than write traffic.
+    - Address high-volume read requests through database optimization and horizontal scaling and intelligent caching.
+    - Start by indexing/denormalization, scaling horizontally with read replicas, and then add caching layers like redis and CDNs.
+    - Concerns include doing cache invalidation, handling replication lag in read replicas and dealing with “hot keys” (content that is requested simultaneously).
+  - Scaling writes:
+    - How do we handle a scaling number of writes?
+    - Sharding, batching, and intelligent load management.
+    - Shard data across multiple servers: each machine handles more writes and thus throughput increases (# writes per unit time).
+    - Use a queue to buffer temporary spikes or prioritize important writes during overload.
+  - Handling Large Blobs:
+    - Can’t just pass in videos/images/documents to servers.
+    - Use presigned URLs.
+    - App server generates temporary presigned URLs that allow for direct uploads to blob.
+    - Allows progress tracking, resumable uploads.
+    - Challenges include state synchronization with database metadata and blob storage, handling upload failures, managing life cycle of large files.
+      - State sync: when upload finished, change database state.
+      - Upload failures: retries.
+  - Multi step processes:
+    - Some business processes have failures. Retries, and other dependencies.
+    - Solve this with Temporal or AWS Step Functions.
+    - Essentially replace scattered state management and manual error handling into automated workflows with audit trails.
+  - Proximity Based Services:
+    - Search for entities by location.
+    - Use geospatial indices to query and retrieve entities based on geographical proximity.
+    - PostgreSQL w/ PostGIS extensions.
+    - Essentially look for entities local to them (not global queries).
