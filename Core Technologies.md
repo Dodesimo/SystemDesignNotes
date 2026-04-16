@@ -1,0 +1,124 @@
+- Databases:
+	- Relational Databases: transactional data, default choice for a product design interview. 
+	- Joins allow us to combine data from multiple tables. 
+	- Indices allow for efficient retrieval times, can also support specialized indices (geospatial, full text)
+	- Create transactions to group multiple operations together into a single atomic operation. 
+	- Postgres or MySQL
+	- NoSQL databases can accommodate a wide range of different data models such as key-value, document, column-family and graph.
+		- Schema less. 
+		- NoSQL is great when we need flexible data models that are evolving.
+	- Scalability: application needs to scale horizontally
+	- Handling Big Data: applications dealing with a lot of data, such as unstructured. 
+	- NoSQL DB: can have own data model (key-value store, column-family store, graph DB).
+		- Range from strong to eventual consistency.
+		- Indexing: make data queries faster.
+		- Scalability: use consistent hashing or sharding to distribute data across many servers. 
+	* Options:
+		- DynamoDB: wide range of features
+		- Cassandra: write-heavy optimized.
+* Blob storage: store data (files, videos, images).
+	* Use a storage service like S3.
+	* Upload data, use that to get back a URL.
+	- Used in conjunction with Postgres or DynamoDB where pointers serve as URLs to blobs in S3. 
+	- Used in the following scheme:
+		- When clients upload a file, they request a presigned URL. 
+		- Server returns a presigned URL, recording it in the database
+		- Client uploads file to the presigned URL
+		- Blob storage triggers notification to server that upload is complete. 
+		- When downloading, client requests a file from the server, gets a pre-signed URL
+		- Client uses the presigned URL to download a file from the CDN, proxying request to underlying blob storage.
+	- Durability: data is very safe
+	- Scalability: infinitely scaled data (handle unlimited number of requests)
+	- Cost + Security: very cheap, safe
+	- Allows for uploads and downloads directly from the client, as well as chunking (resume an upload if it fails partway)
+	- S3 supports multipart upload.
+- Search optimized database:
+	- Full text search: search through a large amount of text data and find relevant results.
+	- A traditional database: doesn’t scale, need a full table scan.
+	- Search optimized databases: use indexing, tokenization, stemming to make search queries fast by building inverted indices making words to documents containing them.
+	- Most search optimized databases support fuzzy search, use of algorithms that tolerate slight misspellings or variations. 
+	- Use elastic search. 
+- API Gateway:
+	- Sits in front of system and routes incoming requests to an appropriate back end service. 
+		- Reverse proxy
+	- Handles: authentication, rate limiting, logging
+	- Use AWS Api Gateway
+- Load balancer:
+	- Distribute traffic across multiple systems. 
+	- Required whenever multiple machines are capable of handling the same request.
+	- Redundant to draw a load balancer in front of every service, so just monitor abstract.
+	- If we want persistent connections like web sockets, use an L4 load balancer (because we care about the HTTP packet content)
+	- Else: use a L7 load balancer.
+	- Use AWS ELB.
+- Queue:
+	- Queues are buffers and distribute work across a system.
+	- Compute resource sends messages on a queue.
+	- On the other end, a pool of workers process messages.
+	- The queue smoothens out load on the system, and also decouple producer and consumer. 
+	- This allows for independent scaling of services. 
+	- Queues should not be added into synchronous workloads
+	- Queues should be used to handle spikes (bursty traffic). 
+	- Also distribute complex work that can be done asychonrous.
+	- Queues are typically FIFO, but some have more complex ordering guarantees.
+	- Retry mechanisms: queue can try to redeliver if something goes wrong. 
+	- Dead letter queue: contains messages that couldn’t be delivered. 
+	- Queues can be partitioned such that each partition gets processed by a subset of workers.
+	- Backpressure: if the rate of requests is greater than the rate of queue processing, things will never get finished. So let’s reject new message or slow down rate at which new messages are getting processed. 
+	- Return errors. 
+	- Use Kafka or SQS
+- Streams/Events Sourcing:
+	- Processing data in real time, supporting complex scenarios.
+	- Event sourcing: tracking changes in application state, replay to reconstruct state. 
+	- Streams: retain data unlike message queues for a period of time, allowing consumers to read/reread data from same or old position. 
+	- Important when processing large amounts of data in real time. 
+	- Stream large amounts of user engagement and then upload data analytics. 
+	- Banking system where every transaction needs to be audited such that each transaction can be stored, processed or replayed, use a stream for this.
+	- Message where when user sends message, its published to a stream for the chatroom, all chat members can receive the message, known as a publish-subscribe pattern.
+	- Streams can be scaled with partitioning.
+	- Allows for multiple consumer groups.
+	- Streams can also be replicated. 
+	- Windowing: grouping events based on time or count, allows for batch processing and aggregation. 
+	- Kafka.
+- Distributed lock: 
+	- Use it to reserve a resource for a particular amount of time across resources.
+	- Use redis:
+		- Set a key to locked, and if another service tries to set that key to reserved, fade. 
+		- Locks can also TTL.
+	- When used?
+		- Use a distributed lock to hold high-demand item in customer’s cart for a short duration.
+		- Ride share: system locks nearby driver, preventing matching with multiple drivers.
+		- Prevent duplication of a Cron job.
+		- Bidding system lock in the last few seconds.
+	- Locking mechanism:
+		- Use multiple redis instances to ensure lock is acquired and released at the same time. 
+		- Locks can be set to expire after a certain amount of time. 
+		- Can lock groups of items or individual ones. 
+	- Deadlocks: two resources are waiting on each other to release a resource, have a predefined mechanism of resource management or queue resources.
+- Distributed cache: 
+	- Can be used to save aggregation metrics.
+	- Can also be used to reduce number of database queries, store user sessions in a distributed cache to reduce database load. 
+	- Speed up expensive queries:
+		- Showing users a list of posts of people they follow is one that requires expensive joins.
+		- Run the query once, store it in cache, return when user requests. 
+	- Eviction policies:
+		- What items are removed when cache full, FIFO, LRU, LFU
+	- Cache invalidation strategy:
+		- How do we ensure that our data is up to date.
+	- Ways of writing to cache:
+		- Write-through cache:
+			- Write data to cache and data store simultaneously. Ensures consistency but slow.
+		- Write around cache:
+			- We directly write data to datastore, fading cache.
+			- Can minimize cache pollution but increase fetch times.
+		- Write back cache:
+			- Write to cache, but asynchronously write data to the data store through some sort of change data capture process. 
+			- Fried if cache fails.
+	- Redis: supports various data structures
+	- Memcache: support strings and binary objects
+- CDN:
+	- A cache that delivers content based on geo location. 
+	- Used to deliver static content typically. 
+	- User requests content, route to the nearest server. If content cached on that, return cached.
+	- If not, fetch content from origin, cache it and return content to user. 
+	- CDN can be used to cache dynamic content: things accessed frequently but altered infrequently. 
+	- CDN can cache API requests, also need to have eviction policies (TTL, invalidation).
