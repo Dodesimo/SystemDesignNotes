@@ -1,0 +1,25 @@
+
+  - In a distributed system, can only have two properties out of three:
+    - Consistency: all reads get the latest writes (all nodes see the same data at the same time).
+    - Availability: every request to a non-failing node receives a response (no guarantee contains the most recent version of the data. All reads get a write).
+    - Partition tolerance: system continues to operate despite failure in parts of the system (such as network partitions between nodes).
+  - Partition tolerance is a must: network failures will happen.
+  - Returning an error when we can’t guarantee that data is up-to-date: chooses consistency.
+  - Show potentially stale data: choosing availability.
+  - When is consistency a demand:
+    - Ticket booking systems, e-commerce inventory (oversell inventory), financial systems (leads to trades at wrong prices); there’s a limited pool of resources.
+  - When to choose availability: when its ok for data to be eventually consistent (will be out of date for a bit)
+    - Update PFP on social media, update movie descriptions on Netflix, review sites.
+  - Prioritize consistency: have distributed transactions: ensure data stores remain in sync through two-phase commit protocols, guarantee consistency.
+    - Single-node solutions: use only a single database to avoid propagation issue.
+  - Availability:
+    - Use multiple read replicas: scale reads even if behind, improves read performance and availability.
+    - Change data capture: track changes in the database and then update it.
+  - We can have a mix of consistency/availability requirements.
+    - Ticketmasters: requires strong consistency to prevent double-booking, but viewing event details can be slightly outdated.
+- Tinder: need consistency when matching (after one person swipes, we want the latest read of the other person), but viewing a profile we can prioritize availability.
+- There can be varying levels of consistency:
+  - Strong consistency: all reads reflect most recent write (most expensive consistent model in terms of performance).
+  - Causal consistency: related events appear in the same order to all users (logical ordering).
+  - Read your own writes consistency: users see their updates immediately, others might see older versions.
+  - Eventual consistency: the system becomes consistent over time but can have temporary inconsistencies (what happens when we prioritize availability).

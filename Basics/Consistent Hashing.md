@@ -1,0 +1,27 @@
+
+- Consistent Hashing:
+  - How to know what to store on what DB instance?
+    - First, try simple modulo hashing.
+    - Take an ID, run it through a hash function.
+    - Then, perform mod operation on it with the number of databases.
+  - Issue with simple modulo hashing: hash function changed whatever event was stored on.
+    - A lot of data needs to be redistributed.
+    - Causes a lot of spike in database loads.
+  - Main issue: simple modulo forces a lot of data redistribution.
+  - Consistent hashing: technique that solves the problem of data redistribution.
+    - Arrange both the data and the database in circular space, called a hash ring.
+  - Hash ring: has a fixed number of points.
+    - Database nodes get put on the hash ring at certain points.
+  - Hash the event id, then find the hash value on the right and move clockwise till a database instance is found.
+    - So when a new database is added, all items that are between the last database counter clockwise and this one are moved to the new database.
+  - New issue: all events for a particular database had to be moved.
+    - Need to spread the load more evenly.
+- Virtual nodes:
+  - Put databases at multiple points on a ring, hash different variations of the database name.
+    - So essentially all points on a hash ring have coverage of a particular database distinctly.
+- How to deal with hot spots:
+  - Read replicas: replicate popular keys across multiple nodes and load balance reads between them.
+  - Key space salting: add a random suffix to hot keys, so that they hash to different nodes.
+  - Adaptive rebalancing: monitor things real-time and move specific key ranges off overloaded nodes.
+- Virtual nodes prevent structural imbalances: an uneven key distribution, some node gets more.
+- Replication, key-salting: workload imbalance.

@@ -1,0 +1,59 @@
+  - Sharding: splitting data across multiple machines.
+  - Partitioning: split a large table into smaller pieces inside a single database instance.
+    - Don’t add more machines.
+    - Horizontal partitioning: we split rows across partitions, a partition per year of orders (same columns, just fewer rows).
+    - Vertical partitioning: split columns across partitions, keep frequently accessed columns in partition or largely unused ones in another, same rows, fewer columns per partition.
+  - Sharding: doing horizontal partitioning across multiple machines.
+  - Each shard has a subset of data.
+  - So each shard is a standalone database with own CPU, storage, and connection pool.
+- Introduces a new problem. Choose a shard key, route queries to the right shard, avoid hotspots, and rebalance data.
+- Choosing by shard key:
+  - A bad key leads to an uneven data distribution (hot spots where one shard gets a lot of traffic, others sit idle).
+  - Needs to have high cardinality, even distribution (spread values across shards evenly), should also align with queries.
+- Good shard keys:
+  - user_id for user centric apps, order_id.
+- Bad keys:
+  - is_premium: only two possible values, so only two shards (not high enough cardinality)
+  - created_at: chronological, so writes would hit only a single shard.
+- Range based sharding:
+  - Group records by a continuous range of values, then assign ranges of values to shards.
+  - When is this good?
+    - Users query different ranges.
+    - Tenants: companies get a range of IDs.
+- Hash-based sharding:
+  - use a hash function to distribute records across shards.
+  - Use that to pick a shard.
+  - Disadvantage: if number of shards change, need to move data around (not the case if we use consistent hashing ring).
+- Directory based sharding:
+  - lookup table to decide where each record lives.
+  - Flexibility: we can move users to dedicated shards.
+  - Rebalance load, update the mapping table.
+  - Downside: every request requires a lookup.
+    - Adds latency, if all data shards are healthy but the directory goes down, system stops working.
+- Hot spots:
+  - some keys are inherently more active than others, so some shards are inherently more active.
+  - Similarly, time-based sharding where sharding by creation data, all writes go to the most recent shard.
+	- Solution:
+	  - Isolate hot keys to dedicated shards (directory based approach).
+	  - Sharding with another key: spread data across multiple shards.
+	  - Some places have dynamic shard splitting.
+- Cross shard operations:
+  - Queries across multiple shards become expensive.
+  - Solution:
+    - Cache a result. Works well in situations where real-time accuracy isn’t needed.
+    - Denormalize: keep related data together through duplications based on query pattern.
+- How to force consistency?
+  - Issue because coordinating writes across multiple independent databases.
+  - Two-phase commit: ask all shards to prepare a transaction, wait for everyone to confirm ready, then commit.
+  - But this is slow and issues happen if the shard or coordinator fail mid transaction.
+- Design only single-shard transactions: keep all relevant data based on id in a single shard.
+- Use sagas where break down steps and failures force rollbacks.
+- Accept eventual consistency: eventually all shards will converge to the right number.
+- Modern databases:
+  - Cassandra: uses a partitioner with virtual nodes, consistent hashing to map partition keys to ranges on nodes.
+  - DynamoDB: hash partition key to route items to internal partitions, split/merge partitions.
+  - MongoDB: shard data into range-based chunks, split this and migrate to keep shards balanced.
+  - SQL (Vitess, Citus, or AWS Aurora, Google Cloud Spanner).
+- Bring up sharding:
+  - Storage, write throughput, read throughput.
+  - Understand bottleneck, why a single db won’t scale.

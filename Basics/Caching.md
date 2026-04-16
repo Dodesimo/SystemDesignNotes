@@ -1,0 +1,72 @@
+- Caching:
+  - Databases store data on disk, every query requires a disk access.
+  - Caches: deal with repeated reads.
+    - Reduce database loads and reduce latency.
+  - External cache: standalone cache application talks to, accessing data in Redis or Memcached.
+  - External caches scale well: since every application server shares the same cache, also supports eviction policies so memory footprint is controlled.
+  - CDN: globally distributed networks of servers that caches content closest to users.
+    - Content is stored at edge servers across world in CDN.
+  - Modern CDNs can cache API responses, HTML pages, even edge logic.
+  - CDN:
+    - The user requests an image from the app, goes to the nearest CDN edge server.
+    - If image is there, return.
+    - If not, go to the origin and return it.
+    - Future users get image instantly from the CDN.
+  - Client side caching: store data close to requester to avoid unnecessary network calls.
+- Also means caching within a client library, Redis clients cache metadata about what nodes are in cluster and what slots so requests can be routed to the right node without querying cluster on every op.
+- We can also cache in the backend machine itself due to a lot of memory:
+  - No network call so even quicker.
+  - Cache things like configuration values, feature flags, hot keys, precomputed values.
+  - However, this has limitations such as when every instance of application has its own cache, so cached data isn’t shared across servers.
+    - If an instance updates or invalidates cached value, others won’t know.
+- Cache aside:
+  - This is called lazy loading.
+  - Application checks the cache.
+  - If data is not there, fetch from database and return it.
+  - If it is there, return the value.
+  - This keeps the cache lean (since we only get data we want), but cache misses are expensive.
+- Write through:
+  - We write to the cache first, and then we sync this write with the database.
+  - Tradeoff: writes are slower since the application must wait till cache to update and database write to complete.
+    - This also pollutes cache with data that’s never read again.
+  - Write-through suffers from dual write: if cache update is good, but database write fails, the system can be inconsistent.
+    - Need retry logic.
+  - Good solution when reads also need to return fresh data and system can tolerate slightly slower writes.
+- Write-back:
+  - Application only writes to cache, cache batches and writes data to the database asynchronously in the background.
+    - Writes are very fast.
+    - But, if cache fails before all data is flushed to DB, we lose data.
+  - Good when we need high write throughput and eventual consistency is acceptable.
+- Read through caching:
+  - Cache is a smart proxy, we always do reads from the cache, there’s a miss, we read from the database.
+    - Example CDN.
+    - Adds complexity.
+- Cache eviction:
+  - LRU: get the least recently used item through linked list or ring buffer.
+  - LFU: get the least frequently used item (keep track of key frequencies, remove the one with lowest frequency, some implementations use approximate LFU).
+    - Works when certain keys are consistently popular over time.
+  - FIFO: queue, just get rid of item based on insertion time.
+    - Can evict hot items.
+  - TTL: time to live, set an expiration time for every key, remove entries that are too old.
+- Common caching problems:
+  - Cache stampede: every request misses the cache and goes to the DB, so hundreds of queries to the database.
+    - A simultaneous cache miss.
+  - How to handle it?
+    - Allow only one request to rebuild the cache, others wait for the result (request coalescing)
+    - Cache warming: refresh popular keys proactively (works only for TTL-based expiration), if invalidate cache on writes, warming doesn’t prevent stampedes.
+- Cache consistency:
+  - Cache invalidation on writes: delete cache entry after database gets updated
+  - Short TTLs: only allow data on cache for a small amount of time.
+  - Accept eventual consistency: for feeds, metrics, and analytics, short delay is fine.
+- Hot key:
+  - Something that gets a lot of traffic compared to everything else.
+    - Single hot key can overload a cache node or Redis shard.
+  - Solve:
+    - Replicate hot keys across multiple cache nodes (LB between them).
+    - Add a local fallback cache for each service (have hot keys there)
+    - Apply rate limiting for specific keys.
+- When caching?
+  - Read-heavy workload.
+  - Expensive queries.
+  - High database CPU
+  - Latency requirements.
