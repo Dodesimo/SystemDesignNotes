@@ -1,0 +1,258 @@
+- need to efficiently send updates between servers and clients
+- standard HTTP doesn't work (instead follows a request-response model)
+	- client ask for data and servers respond  - doesn't work for servers when they need to push updates proactively to clients
+- solution:
+	- systems require real-time updates, two pieces
+	- first "hop": how do we get updates from the server to the client
+	- second "hop": how do we get updates from the source to the server
+- networking background:
+	- Network Layer: protocol layer responsible for routing and addressing
+	- Transport Layer: packet splitting + guarantees about ordering (TCP, UDP)
+	- Application Layer: final layer that is a application protocol (DNS, HTTP, etc.)
+- what happens when we request a URL into browser:
+	- DNS resolution: converts human-readable domain name into IP address
+	- TCP handshake between TCP connection with server through three-way handshake
+			- SYN: requests a connection from the server
+			- SYN-ACK: acknowledges the request
+			- ACK: client sends request to establish the connection
+	- after this handshake, HTTP request is made to the server
+	- server: processes request, retrieves requested web page and prepares HTTP response
+	- HTTP response: gets sent back to the client
+	- TCP teardown: after data transfer is done, client and server close TCP through a four-way handshake
+			- FIN: client sends FIN to server to terminate connection
+			- ACK: acknowledges the FIN packet
+			- FIN: server sends fin to the client to terminate its side of the connection
+			- ACK: client acknowledges the server's FIN packet with an ACK
+	- key things to note:
+		- each round trip adds latency to request between client/server
+		- TCP connection is a state that both client/server need to maintain
+			- unless features like HTTP keep-alive are done, connection setup gets repeated for every request
+- with load balancers:
+	- Layer 4: load balancing routing decisions are made at the metadata level (like IP addresses/ports) without looking at packet contents
+		- maintain persistent TCP connections between client and server
+		- Fast and efficient because there's minimal packet inspection
+		- no routing decisions based on application data, used when raw performance is priority
+		- if client establishes TCP connection through L4 load balancer same server handles all subsequent requests 
+			- well for protocols that require persistent connections
+	- Layer 7: inspects packet contents and then sends 
+		- more flexible, can route based on request content
+		- some load balancers that are L7 explicitly support connection-oriented protocols like WebSockets but L4 load balancers are better
+- simple polling:
+	- client regularly asks the server for updates
+		- simple HTTP request done at a regular interval
+	- pros:
+		- simple to implement
+		- stateless
+		- no special infra
+		- works with any networking infra
+		- doesn't take time to explain
+	- cons:
+		- higher latency (depends on the time required to process)
+		- limited update frequency
+		- more bandwidth
+	- mechanisms to reduce the overhead:
+		- take advantage of HTTP keep-alive connections
+		- set a HTTP keep-alive longer than polling interval (establish TCP connection once)
+- long polling:
+	- client makes request to server, server holds request open until new data is available
+	- server takes really long to process request
+	- server responds with data, finalized HTTP requests, client makes a new HTTP request
+	- advantages:
+		- built on HTTP
+		- easy to implement
+		- no special infra
+		- stateless server-side
+	- disadvantages:
+		- higher latency than alternatives
+		- more HTTP overhead
+		- resource intensive
+		- can't work with frequent updates, monitoring more painful
+		- browsers limit the number of concurrent connections per domain
+	- when to use:
+		- near real-time updates w/ simple implementation
+		- good choice when updates are infrequent and simple solution is best
+		- long async process running, but we want to know when it finishes (long-poll)
+- server-sent events:
+	- extension on long-polling allowing server to send stream of data to the client
+	- special header `Transfer-Encoding: chunked`
+		- tells us that the response is a series of chunks
+		- we don't know how many or how big 
+	- SSE:
+		- instead of full response when data is available, server sends chunk of data and keeps request open to send more data as needed
+		- good for situations where servers push data to clients but clients don't need to send (one-sided)
+	- how SSE works:
+		- Client establishes SSE connection
+		- Server keeps connection open
+		- Server sends messages when data changes/updates happen
+		- Client receives updates in real time
+	- wrapped through EventSource object
+	- advantages:
+		- built into browsers
+		- automatic reconnection
+		- works over HTTP
+		- more efficient than long polling
+		- simpler to implement
+	- disadvantages:
+		- one-way communication
+		- limited browser support
+		- some proxies don't support streaming
+		- browsers limit # of concurrent connections (have a few SSE connections per domain)
+		- monitoring is harder
+	- most SSE connections are short, so sending messages for longer periodic means need to talk about how clients re-establish connections and how they deal w/ gaps
+		- there's a "last event ID" to cover gaps
+- web sockets:
+	- bi-directional communication between client and server
+	- build on HTTP through "upgrade" protocol, existing TCP connection can change L7 protocol
+		- can utilize existing HTTP session information 
+	- once connection established, client and server can send messages to each other through opaque binary blobs
+		- strings, JSON, Protobufs, etc.
+	- steps:
+		- client initiates WebSocket handshake through HTTP
+		- connection upgrades to WebSocket protocol
+		- Client and server can send messages
+		- Connection stays open until closed
+	- chat app:
+		- connect to WebSocket endpoint through HTTP, connection gets upgraded to websocket
+		- allows for messages to get received as they happen
+	- challenges:
+		- persistent connection, so need L4 load balancing support
+		- when servers get redeployed
+			- server all old connections and have them reconnect
+			- have new servers take over and keep connections alive
+			- prefer the former b/c its simpler but there are limits to how persistent connection can be
+		- balancing load can be more complex
+			- stick with each allocation decision made
+			- load balancer wants to send new request to different server, can't do that because it would break existing connection, can also send to the same server
+		- b/c of the stateful connections, many architecture terminate web sockets early so that rest of the system can be stateless
+	- advantages:
+		- full duplex communication
+		- lower latency due to limit overhead
+		- efficient for frequent messages, wide browser support
+	- disadvantages:
+		- harder to implement
+		- special infra needed
+		- stateful connections make load balancing and scaling harder
+		- need to handle reconnections
+		- need high-frequency, bi directional communication, use WebSocket
+			- emphasis on high frequency, because you can SSE subscriptions for updates and do writes through HTTP
+	- load can be uneven resulting in hotspots and failures
+- WebRTC:
+	- Direct peer to peer communication b/w browsers video/audio calls, data sharing line document editors
+	- clients talk to a signaling server that keeps track of what peers are available together with connection information
+	- in practice most clients don't allow inbound connections on specific ports through NAT
+	- so work around restrictions with:
+		- STUN: session traversal utilities for NAT (hole punching), allow peers to establish publicly routable addresses and ports
+		- TURN (traversal using relays around NAT): using a relay service, bounce requests through central server that can be routed to the appropriate peer
+	- signalling server:
+		- relatively lightweight, doesn't handle much of the bandwidth (bulk handled by peer to peer connections)
+	- chat app:
+		- connect to the signaling server through WebSocket -> find all peers
+		- then establish peer to peer connections with them
+	- useful for video/audio calls, screen sharing, and gaming
+	- reduces server load (when clients talk to each other frequently, use WebRTC to reduce the load on servers)
+	- advantages:
+		- direct peer communication
+		- lower latency
+		- reduced server costs
+		- native video/audio support
+	- disadvantages:
+		- complex setup
+		- requires signalling server
+		- NAT/firewall issues
+		- connection setup delay
+- how does server get triggered when updates happen
+	- system produces updates that our server gets
+	- Pulling with Simple Polling:
+		- pull-based 
+		- client constantly asking server for updates, server needs to maintain this state to respond
+		- maintain a database to store the updates and from this database clients can pull the updates they need
+		- so just write updates to the database
+		- with polling, tolerating a delay
+			- poll is the trigger
+			- actual update may have happened time prior
+		- decoupled source of the update from client receiving it 
+			- data is not flowing from the producer to the consumer
+			- producer just checks the database and finds updates
+		- advantages:
+			- simple to implement
+			- state constrained to DB
+			- no special infra
+		- disadvantages:
+			- high latency
+			- excess DB load if we poll a lot and updates are infrequent
+		- useful when not responding quickly but just wanting real-time updates
+		- issue emerges when there's a million clients polling every X seconds, a lot of volume
+	- Pushing Via Consistent Hashes:
+		- in long polling, SSE, WebSockets, client has a persistent connection to one server and that server is responsible for sending updates to the client
+		- how do we know what server to send for a particular user
+			- ideally:
+				- we figure out which server User is connected to 
+				- send the message to that server
+				- server looks up which request is associated with
+				- server writes the messages
+		- two ways: first is hashing
+			- with a simple hash function:
+				- client connects to random server
+				- server uses server list to compute which server is responsible (hashing Id and applying modulo N)
+				- server redirects the client to the correct server
+				- client connects to the correct server
+				- server adds that client to a map of connections
+			- with this, to send messages to User C, simple hash user's ID and figure out what server is responsible
+			- this is great when N is fixed, but when service gets scaled up or down, number of servers requires users to disconnect/reconnect to different servers
+			- consistent hashing: minimizes the number of connections that need to move with scaling
+				- this is because servers and users onto a hash ring]
+				- each user connects to the next server clockwise in the ring
+		- advantages:
+			- predictable server assignment
+			- minimal connection disruption while scaling
+			- works w/ stateful connections
+			- easy to remove and add servers
+		- disadvantages:
+			- complex implementation
+			- need Zookeeper coordination
+			- servers need to maintain routing information
+			- connection state is lost if server fails
+		- when to use:
+			- maintain persistent connections
+			- valuable when each connection requires significant server-side state hard to build
+			- b/c hashing assigns each to a predicable server, state only lives in one place
+			- scale up or down, small fraction of connections move
+	- pushing via Pub/Sub:
+		- single service is responsible for collecting updates and broadcasting them to all interested clients
+		- our connections are now made to lightweight servers that subscribe to relevant topics and forward updates to appropriate clients
+		-  when clients connect, don't connect to a specific endpoint, can connect to any
+			- they will register the client w/ the pub/sub server to any updates can be sent to them
+		- client establishes connection with endpoint server
+		- endpoint server registers client w/ Pub/Sub service with a topic, subscribing, keeping a mapping from topics to connections
+		- when updates happen:
+			- updates are pushed to the pub/sub service to the specific topic
+			- pub/sub service broadcasts to all subscribed clients
+			- server receives update, looks up what client was subscribed, forwards the update
+		- send messages:
+			- publish to that user's topic and the pub/sub service broadcasts them to all the subscribed servers
+			- servers forward them to appropriate clients
+			- advantages:
+				- broadcast updates to a large number of clients efficiently
+				- managing load on endpoint servers is easy
+				- minimize state proliferation
+			- disadvantages:
+				- don't know whether subscribers are considered to the endpoint server
+				- Pub/Sub service is a point of failure and bottleneck
+				- introduce indirection that adds latency
+				- many-to-many connections betwen service hosts and endpoint servers
+		- pub-sub:
+			- great for broadcasting updates to a large number of clients (easy to setup)
+			- little overhead on the endpoint servers + latency is minimal
+			- talk about single point of failure and bottleneck
+				- Redis cluster: scale the pub/sub service based on sharding the susbcriptions across multiple hosts ( so partition based on the user id)
+- common deep dives:
+	- failures and reconnection:
+		- detect disconnections quickly through heartbeats
+		- need to track what messages or updates a client has received (when they reconnect, get everything they missed)
+			- per-user message queue or sequence numbers
+	- millions of followers all need the same update:
+		- instead of writing immediately, cache update and distribute through multiple layers (batching)
+	-  message ordering:
+		- maintain vector clocks or logical timestamps
+		- or funnel all messages through server or partition (trades scalabiliity for consistency)
+- 
