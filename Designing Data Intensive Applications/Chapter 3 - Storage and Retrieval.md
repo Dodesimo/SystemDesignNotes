@@ -1,0 +1,231 @@
+- how do databases efficiently store data and find that data?
+- most databases use a log (append-only data file) at the end
+	- allows for near constant time insertions
+- reads are bad: `O(n)` reading the whole file
+- you need indices that allow for better reads
+	- metadata that allows for easier location of data 
+	- search same data in different ways, need different indices
+- because this is an additional data structure, it adds overhead
+	- doesn't impact content, just query performance
+	- makes writers slower because the index needs to be updated every time data is written
+- hash indices:
+	- used for key-value data
+	- data storage is only appending to file
+	- have a in-memory hash map where every key is mapped to a byte offset in the data
+		- so you can immediately track to that part of the file
+	- so when you append new key-value pair, update the hashmap to reflect data offset 
+	- look up value, use hash map to find offset in data file and seek that location, read value
+	- having the whole hashmap in memory: improves performance
+	- if you keep appending to file, how do you avoid running out of disk space?
+		- break log into segments of size and compact the segments
+		- compaction: we throw away duplicate keys and only keep most recent update
+	- since merging would make segments smaller, merge several segments at the same time when compacting
+		- merged segment written to new file
+	- after we merge, switch read requests using new merged segment (old segment can be deleted)
+	- every segment has own hash table that map keys to file offsets
+		- to find a key, check the most recent segment's hash map
+		- if not found, go to the second most recent
+	- what is the file format?
+		- use binary format encoding length of string followed by raw string
+	- how do you delete?
+		- add tombstone record to the file
+		- when log segments are merged, tombstone tells the merging process to discard previous values
+	- how do you do crash recovery?
+		- restore segment's hash map by reading entire segment file from beginning to end and maintaining track of most recent value for every key as you go along
+		- takes a while if segment files are large
+		- so you periodically snapshot the hash map of each segment on disk and that gets loaded quicker
+	- partially written records:
+		- if db crashes halfway through appending record, use checksum to detect corruption
+	- concurrency:
+		- writes are appended to log strictly sequentially
+		- so have only one writer thread and have numerous readers
+			- read-writer lock
+	- why don't we update the file in place and overwrite the new value?
+		- appending and segment merging are sequential write operations and faster than random writes
+		- concurrency and crash recovery is easily when modifications can only happen at the end
+			- don't worry about case where crash happened while value was overwritten
+		- merging old segment avoids problem of data file getting fragmented
+	- key requirements:
+		- hash table needs to fit in memory (else retrievals will be very slow)
+		- can't do range queries quickly
+- sorted by key: 
+	- sorted string table
+	- why do we want this over log segment w/ hash index:
+		- merging is easier (`O(n log n)` merge sort)
+			- two pointers
+		- so if two things have same key, pick the one with more recent values
+		- searching can be done in binary search fashion 
+		- merging two list
+			```python
+			listOne = [2,5,6]
+			listTwo = [3, 10, 50]
+			result = []
+			l1P = 0
+			l2P = 0
+			while l1P < len(listOne) and l2P < len(listTwo):
+				if listOne[l1P] < listTwo[l2P]:
+					result.append(listOne[l1P])
+				else:
+					result.appendlistTwo[l2P]:)
+			```
+	- maintaining sorted key data structure:
+		- when write arrives, add to memtable (in-memory table) which is a sorted tree structure
+		- when memtable is bigger than threshold, write it out to disk as a SSTable file 
+			- new SSTable ready, memtable emptied
+		- in order to serve read request, find in memtable, most recent disk segment, next older segment
+		- time to time compact
+		- maintain log on disk for each write immediately
+			- log not sorted but only maintain to keep after a crash
+	- where is this used?
+		- lucene: Elasticsearch maintaing key-value structure where key is a word and value is IDs of all documents containing word
+	- worst case search:
+		- look up all keys that don't exist in the database (so you would have to check memtable, then segments all the way back to oldest)
+		- use a bloom filter: memory efficient DS for approximating set contents
+			- for sure tells u if not in DB
+- b-tree index:
+	- keep key-value pairs sorted by key, do key-value lookups and range queries
+	- B-trees break down the database into fixed-size blocks or pages
+	- each page identified w/ address or location, allowing for a page to refer to another through pointer
+	- root of the tree has k keys, k + 1 references to child pages
+	- keep going till you get a leaf page (page containing individual keys, not a ragen)
+		- contains the value for each key inline, containing references to pages where each value can be found
+	- update value for a key:
+		- search for leaf for the key, change value for that page, write page back to disk
+	- new key, if there's not enough free space in the page, split into two half pages
+		- parent page handles this new subdivision
+- B-tree: overwriting a page on disk with new data
+	- overwrite doesn't change location of page (references in page remain intact)
+	- on magnetic hard drive, move the disk to the right place (wait for right position, overwrite appropriate sector)
+		- some: require diff pages to be overwritten
+	- to make the DB resilient to crashes, add additional data structure called write-ahead log (append only file with every B tree modification written before applying to pages of the tree itself)
+		- DB comes up after a crash, log used to restore B tree back to a consistent state
+	- writes wise, B-tree writes every piece of data at least twice (once to log, once to tree page)
+	- log structured indices also re-write multiple times due to repeated background merging
+	- updating pages in-place: need concurrency control (multiple threads access same time)
+		- do so through latches (light-weight locks)
+	- optimization:
+		- overwriting pages and maintaining WAL, use a copy-on-write scheme (modified page in different location, new version of parent page is created pointing at new location)
+		- abbreviate the keys (pages on the interior, keys only provide infromation to act as boundaries)
+			- so abbreviation packs more, higher branching factor
+		- pages anywhere on disk, so scanning over key range in order is inefficient
+			- so if we read sequentially lay out the tree so leaf pages appear in sequential order
+		- pointers added to tree, each leaf page can have pointer to left child and right child
+- B tree vs LSM tree:
+	- LSM: higher throughput of random writes, since they become sequential writes to the device (tree is a sorted data structure)
+		- flush to disk in a sequential fashion
+		- faster for writes
+	- B-trees: faster for reads because writes require writing to WAL, splitting parent page
+	- downside of log-structured storage: compaction interferes with performance of ongoing reads/writes
+		- storage systems try to do compaction incrementally, disk has limited resources to request needs to wait
+	- B-tree: every key exists in a single place in the index
+	- log structured: multiple copies of the same key in different segments
+		- so B-tree has greater transactional semantics (transaction isolation implemented through locks on ranges of keys)
+- other structures:
+	- B-tree and LSM: primary key indices: identify a row in a table or one document in a db or a vertex in a graph db
+	- secondary index: allow for efficient joins on the same table
+	- can construct from a key-value index, keys aren't unique (many rows with the same key)
+		- solve in two ways: make each value in index a list of matching row identifiers
+		- or make the key unique by appending row id to it
+- key is what the queries search for, but value could be multiple things: actual row or reference to row stored elsewhere
+	- where rows are stored is a heap file, data is stored in no particular order
+	- common approach because it avoids duplicating data when multiple indices are present
+- updating value without changing key, heap file can be very efficient (record overwritten in place)
+	- situation more complex if new value is larger, moved to a new location where there's enough space
+	- so all indices updated to point at new heap location or forwarding pointer left behind
+- sometimes, extra hop from index to heap is too much of a performance penalty, so store the indexed row directly in the index
+	- clustered index
+	- primary key of a table is a clustered index and secondary indices refer to the primary key
+- compromise between clustered index and non-clustered index: covering index, index w/ included columns (stores some of the columns within the index)
+	- some queries can be answered w/ the index alone
+	- duplication of data: indices can speed up reads, but require additional storage and add overhead on writes
+	- ensure consistent data
+- multicolumn indices:
+	- concatenated index (combine several fields into a single key by appending column to another)
+	- general way of querying several columns at once, important for geospatial data
+		- for a query like:
+			- `SELECT * FROM restaurants WHERE latitude > 51.4946 AND latitude < 51.5079 AND longitude > -0.1162 AND longitude < 0.1004`
+	- B-tree or LSM-tree index: not able to do such a query quickly since its a one dimensional query
+		- translate two dimensional region into a single number through space-filling curve, and then use regular B-tree index
+			- geospatial index like PostGIS or R-tree
+	- multidimensional indices: not just geographic locations, can do a three-dimensional index or a two-dimensional index
+		- with one-dimensional indices, scan over all records with the index and then filter over
+- fuzzy indices:
+	- need to search for similar keys (existing indices give you ways to search exact values)
+		- Lucene gives you search for words within certain edit distance (leetcode DP)
+	- Lucene: uses SSTable-like structure for term dictionary
+		- finite state automaton over characters like a Trie
+		- transform into a Levenshtein automaton for efficient search
+- disks are harder to deal with:
+	- but they have durability 
+	- lower cost per gigabyte
+	- RAM becomes cheaper, cost per gigabyte argument doesn't make sense
+	- Datasets aren't that big, so keep them entirely in memory through in-memory databases
+	- some in-memory key-value stores are only for caching (so data can be lost)
+	- but some support durability:
+		- log of changes, writing periodic snapshots, replicating in-memory state to other machines
+	- even though you write to disk, still in-memory DB (disk merely used as an append-only log for durability)
+	- in memory DB is faster because they avoid overheads of encoding in-memory data structures in form that's written to disk
+	- have support for larger datasets through anti-caching approach through eviction of pages
+- transaction processing or analytics?
+	- transaction: group of reads/writes that's a logical unit
+	- application looks up small number of records based on a key through index
+		- records are inserted/updated based on input
+		- OLTP (online transaction processing)
+	- for data analytics, scan over a large number of records
+		- this is called online analytic processing (OLAP)
+		- bulk aggregation over records, not just smaller transactions
+	- use diff DB for OLAP: data warehousing
+	- don't do data queries on the OLTP database because that can be expensive and scan large parts of dataset
+	- data warehouse:
+		- read-only version of OLTP systems
+		- data taken from OLTP databases, transformed ton analysis-friendly schema
+		- then loaded into data warehouse
+		- Extract Transform Load
+	- above indices work for online transaction processing but not good for analytic queries
+	- data warehouse: relational and uses star schema
+		- center fact table (each row of the table represents even that happened at a time)
+		- can be incredibly large
+		- each row of fact table are attributes (could be direct values or columns in the fact table that are foreign key references to dimension tables)
+			- contains information about categorical things like store
+	- snow flake schema:
+		- each of these dimension tables are further broken down with more information
+- column oriented storage:
+	- fact tables have a lot of columns, but a query only accesses a few of them at a time
+	- in most OLTP DB, storage is in a row-oriented fashion (all values from one row of a table are stored next to each other)
+	- store all values from each column together instead of each row
+		- so a row X is all entires at the Xth position from each of the columns
+	- columns can also be easily compressed
+		- use bitmap encoding
+	- number of values for a column is small compared to number of rows (retailer has billions of sales, but only 100,000 products)
+		- make a column w/ n distinct values have n seperate bitmasks (one for for each distinct value, with a bit for each row)
+		- bit is one if the row has value, 0 if not
+		- bitmaps allow for quick determination of OR:
+			- `WHERE product_SK in (30, 68, 69)`: or the bit maps of the three 
+			- `WHERE product_sk = 31 AND store_sk = 3`: and
+	- column storage: more efficient use of CPU cycles
+		- query engine can chunk compressed column data fitting in CPU L1 cache and iterate through it
+		- column compression allows more rows to fit in the same amount of L1 cache
+		- AND and OR: operates on chunks of compressed column data directly
+	- sorting: sort entire rows (can't sort columns independently since we wouldn't know what items belong to the same row)
+	- advantage of sorted order: compress the columns better
+		- primary sort column doesn't have a lot of distinct values, after sorting we get a long run of the same value repeated
+		- use run-length encoding to compress 
+	- can have multiple sort order in a column oriented store, allow for us to query data in multiple ways
+		- similar to having secondary indices for a row-oriented store
+		- difference: row oriented store keeps row in one place and secondary indices are pointers
+		- column store: normally no points to data elsewhere, just columns w/ values
+	- writes are difficult with compressed, column oriented data
+		- use LSM trees
+		- write to in-memory sorted structure
+		- when enough writes, merge with column files on disk and write to new files
+- can cache aggregates if multiple queries call them
+- create materialized view: contents of some query
+	- copy of query results
+	- contrasts virtual view: shortcut for writing queries
+	- read from virtual view, SQL engine expands on the fly, processes the expanded query
+- when the actual data changes, materialized view needs to be updated (since its a denormalized version) 
+- olap/data cube: aggregates grouped by different dimensions
+	- each row and column tells you the aggregate for that particular value of those variables 
+	- end of the row or column gives you total for the other particular dimension
+	- disadvantage: not as much flexibility as querying raw data
+	- advantage: certain queries become fast due to pre computation
