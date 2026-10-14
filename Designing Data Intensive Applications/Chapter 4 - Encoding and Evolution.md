@@ -1,0 +1,198 @@
+- data format/schema changes, corresponding change to application code needs to happen
+	- do this in rollout fashion
+	- deploy new version to few nodes, check if working, work through all the nodes
+	- this is for server-side
+	- client-side: mercy of user
+- b/c new and old versions of the code coexist, need compatibility
+	- backward compatibility: new coder can read old code data
+	- forward compatibility: old code reads new code data
+- data kept in two diff representations:
+	- in memory: objects, structs, lists, arrays
+	- when sending over network and/or to file, encode as self-contained sequence of bytes
+	- translation of in-memory representation to byte sequence: encoding (serialization/marshaling)
+	- reverse is decoding (parsing, deserialization, unmarshalling)
+- libraries have support for encoding (pickle for Python)
+	- convenient but problems
+		- encoding is tied to language, reading data is hard in another language
+		- restore data, decoding needs to instantiate arbitary classes
+		- versioning not thought of
+		- efficiency is not thought of either
+- json/xml/binary variants:
+	- issues: ambiguity around number encoding (can't distinguish between number and string that consists of digits) in XML and CSV
+	- JSON: can distinguish strings and numbers, can't separate integers and floating points 
+	- JSON/XML: support Unicode character strings, but not binary strings (sequences of bytes without character encoding)
+		- workaround: encode binary data w/ Base64
+- binary encoding:
+	- JSON is less verbose than XML, but uses a lot of space compared to binary formats
+	- some of them extend set of datatypes but otherwise keep the data model unchanged
+		- don't prescribe schema, include all object field names
+	- literally just byte encoding: first bytes specify what type of data, so on
+- thrift and protocol buffers (protobuff):
+	- binary encoding libraries
+	- both require schema for any data that's encoded
+	- schemas: each field has a type annotation, a length indication when relevant, and a field tag that corresponds to a field name (but the actual JSON doesn't have field names)
+	- can be more compact in CompactProtocol: pack field type and the tag number into single byte
+		- use top byte to signify variable lengths still coming
+	- you get the idea just specifiy field type, what type of data, and what value
+- how to handle schema evolution?
+	- change name of field in schema, but can't change the field tag
+	- add new fields by giving each field a new tag number
+	- this enables forward compatibility because new code can read records written by new code
+	- backward compatibility: as long as each field has a unique tag number, new code can always read old data
+		- but can't add new required tags
+		- every field added needs to be optional or have a default value
+	- removing a field: can only do if optional, and can't use the same tag number again (since data written somewhere could use the old tag number)
+- data types and schema evolution:
+	- changing data type of a field: can cause precision loss or truncation
+	- protocol buffers has repeated marker for fields
+		- same thing just appears multiple times
+	- we can now change optional into repeated field
+		- it just becomes a single valued thing
+- avro:
+	- no tag numbers in the schema
+	- encode example record, encoding is just 32 bytes long
+	- its just a length with the actual bytes in UTF-8 byte format
+		- so there's no field tag 
+	- to parse data, go through fields in the order in the schema
+	- so every single client needs to read the code in the exact same schema as the code that wrote the data
+	- has a writer's schema and a reader's schema
+	- writer's schema: encodes data using whatever version it knows (the client)
+	- when application decodes data, expects it in a schema called the reader's schema
+	- the writer's schema and reader's schema don't have to be the same just compatible
+		- data decoded, Avro resolves differences by looking at the two schemas and translating data from one to another
+	- so if the order isn't the same, its fine because the resolution matches things by name
+	- field on reader's side doesn't have a field on writer's side, default valued
+	- field on writer's side doesn't have field on reader's side, ignored
+	- schema evolution:
+		- forward: new version of schema as writer and old version of schema as reader
+		- backward: new version of schema as reader, old version as writer
+		- you can only add or remove fields that have default values
+			- so if new default-valued field is added, when reading record with old schema, default for the missing value
+	- null: create union type field
+	- changing datatype of field is possible given conversion is possible
+	- changing field name is tricker: reader's schema contains aliases for field names (match old writer's schema field name against aliases) or add branch to union type
+		- not forward compatible (since old code has no idea about the new name)
+	- how does the reader know the writer's schema?
+		- depends on the context of Avro:
+			- large file with a lot of records: writer specifies the schema at the start of the file
+			- database: different records written at different points in time with different schemas, so add the version number for the record
+				- fetch writer's schema for the version number from the DB
+			- send records over network connection: negotiate schema version on connection setup then use that for the lifetime of connection
+	- advantage of aviro compared to protocol buffers and thrift is that schema doesn't contain tag numbers
+		- this is friendlier to dynamically generated schema
+		- can easily generate Aviro schema from relational schema and then encode DB contents with that schema and dump everything to Avro object file
+		- generate record schema for each DB table
+		- if schema changes (table has a column added or. removed), generate new schema
+			- anyone who reads new data files sees that fields of the record have changed
+			- but since fields can be identified by name, updated writer's schema is matched w/ old readers
+		- versus Thrift or Protocol Buffers: manually change the column name to field tag mapping
+	- code geneation:
+		- Thrift and Protocol Buffers: rely on code generation, schema defined, generate code implementing schema in language of choice
+		- statically typed languages are good b/c allow in-memory structures to be used for decoded data
+		- allows for type checking and stuff
+		- in dynamically typed languages, there's no point in generating code since there's no compile-time type checker
+			- code generation frowned upon
+		- Avro has code generation but its optional
+		- can literally open up file and look at it
+- schemas:
+	- Thrift and Avro: simpler to implement and use (schema language much simpler than XML or JSON)
+	- can have proprietary binary encoding based on schemas
+	- specific to a DB, DB provides a driver
+	- so even through JSON, XML, CSV are widespread
+	- binary encodings are better because:
+		- more compact tha binary json (omit field names, instead have tag values)
+		- schema is required for decoding so its uptodate
+		- DB of schemas allow for backward/forward compatibility checks
+		- for statically typed programming languages, ability to generate code is useful
+- modes of data flow:
+	- data flows between processes through databases, calls through services, asynchronous message passing
+	- database:
+		- process writing to DB encodes the data, process that reads from the DB decodes it
+		- different processes in different versions could be running
+		- value in DB could be written by new version and then read by older
+		- other issue:
+			- add field to record schema, newer code writes value for that new field, but older version of code reads record, updates, writes back
+			- NEED to ensure the new field is intact
+			- decode DB value into application objects, and then re encode, could have the unknown field get lost
+	- data outlives code: database contents that are old remain in original encoding unless explicitly rewritten
+	- databases allow simple schema changes:
+		- add new column w/ null default value without rewriting existing data
+		- this allows for appearance as if schema is encoded with single schema even though underlying may be different
+	- archival:
+		- taking snapshot of DB from time to time, dump is encoded in latest schema
+			- copying data: encode consistently
+		- dump written in one go and immutable: use Aviro container files (schema at the top), encode in Parquet as well
+	- rest and RPC:
+		- client and server: straightforward
+		- browsers aren't the only type of client
+			- app on mobile device or desktop: make requests to server
+			- client-side JavaScript application in web browser: uses XMLHttpRequest to be a HTTP client
+		- HTTP as underlying protocol: web service
+			- multiple situations
+			- client app: making requests to service over HTTP
+			- service making requests to another owned by same org in same data center: middleware
+			- one service making requests to service owned by different organization
+		- two approach for communication: REST and SOAP
+		- REST: simple data format, URLs for resource id, HTTP for cache control, auth, content negotiation
+		- SOAP: XML-based protocol for network API requests
+			- doesn't really use HTTP
+		- API of SOAP web service: XML-based lang that enables code generation
+			- Client can access remote service with local classes and method calls 
+			- good for statically typed languages not good for dynamically ones
+		- users of SOAP rely on tool support, code generation, IDEs: hard to integrate with SOAP services
+	- RPC (remote procedure call):
+		- request to remote network service is the same as calling function/method in language
+		- this is flawed:
+			- local function call is predictable (fail/success), but netwrok request is unpredictable
+			- local function call returns, throws, never returns due to infinite loop, network request can return without a result due to a timeout
+				- but you have no clue why or how it happened
+			- failed network request: things are getting done but requests are lost. so if you retry, no idempotency
+			- call local function, takes the same time to execute
+				- network request is slower than function call, latency also variable
+			- calling local function, can pass in pointers to objects in local memory
+				- network request: everything needs to get encoded
+			- client/service in different languages, so need to translate data types
+				- this is hard to due to overflow and things like that
+		- despite this its popular because its quick
+		- javascript: futures/promises encapsulate async actions that could fail
+		- gRPC: supports streams (get a series of requests/responses over time)
+		- why is REST better?
+			- good for experimentation and debugging (make requests with web browser or CURL)
+			- supported by all mainstream langauges
+			- lots of tools
+	- data flow:
+		- reasonable to say servers are updated first and clients second
+			- servers need to support old queries/requests
+			- clients need to support new server responses (this is automatic since the clients are upgraded after the servers)
+		- backward and forward compatibility:
+			- Thrift, gRPC, Avro: evolved based on encoding
+			- SOAP: requests/responses are XML schemas, evolved but there's certain nuances
+			- REST APIS: use JSON for responses and URL-encoded request parameters for requests
+				- adding optional request params and new fields are compatibility changes
+		- compatibility harder: RPC used for communication across org boundaries, provider of service has no control over clients, can't force upgrades
+			- so essentially indefinite compatibility
+		- API versioning: use version number in URL or HTTP header
+- asynchronous message parsing systems:
+	- client's request (message) delivered to another process with low latency (sent through an intermediary message broker)
+	- why use a message broker?
+		- buffer if recipient unavailable or overloaded, boost system reliability
+		- redeliver messages to process that's crashed (prevent messages lost)
+		- avoids sender to know intricacies of target (IP address, port number)
+		- one message sent to numerous recipients
+		- decouple sender from recipient
+	- usually one way: sender doesn't expect replies, shoot and forget
+	- process sends a message to a queue/topic and broker ensures this is delivered to multiple consumers/subscribers of that queue or topic
+		- many producers and consumers of same topic
+	- typically one-way data flow, but consumer may itself publish to another topic or reply queue is consumed by sender of original message
+	- message brokers don't enforce data models
+	- actor model:
+		- no threads
+		- logic is encapsulated as actors: communicate with other actors through asynchronous messages
+		- message delivery isn't guaranteed, oftentimes lost
+		- every actor processes one message a time, each actor scheduled independently by the framework 
+	- distributed actor model:
+		- use above principle to scale application across multiple noes
+		- use same message-passing mechanism
+		- doesn't matter if sender and recipient are on same node or different nodes
+			- different nodes: encode and send over network and then decode
+		- so you integrate message broker and actor programming model essentially
